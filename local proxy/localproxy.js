@@ -1,80 +1,51 @@
-const http = require('http');
-const sodium = require('sodium-native');
+const net = require('net');
+const url = require('url');
 
-// Proxy Configuration
+// Local Proxy Configuration
 const LOCAL_PROXY_PORT = 8888;
-const PROXY_SERVER_IP = '123.123.123.123';
-const PROXY_SERVER_PORT = 1080;
+const REMOTE_PROXY_IP = '103.77.243.214'; // IP of the remote proxy server
+const REMOTE_PROXY_PORT = 1080; // Port of the remote proxy server
 
-const password = "i'm here if you need me";
-const key = Buffer.alloc(sodium.crypto_secretbox_KEYBYTES);
-const hash = Buffer.alloc(sodium.crypto_generichash_BYTES);
-sodium.crypto_generichash(hash, Buffer.from(password, 'utf8'));
-hash.copy(key, 0, 0, sodium.crypto_secretbox_KEYBYTES);
+const localProxyServer = net.createServer((clientSocket) => {
+    clientSocket.on('data', (chunk) => {
+        // Parse the request data to extract the target URL
+        const request = chunk.toString();
+        const firstLine = request.split('\n')[0];
+        const [method, fullUrl] = firstLine.split(' ');
+        if (method === 'CONNECT') {
+            const { port, hostname } = url.parse(`//${fullUrl}`, true, true);
+            console.log(`Local Proxy: Connecting to ${hostname}:${port}`);
 
-function encrypt(text) {
-    const message = Buffer.from(text, 'utf8');
-    const cipher = Buffer.alloc(message.length + sodium.crypto_secretbox_MACBYTES);
-    const nonce = Buffer.alloc(sodium.crypto_secretbox_NONCEBYTES);
-    sodium.randombytes_buf(nonce);
-
-    sodium.crypto_secretbox_easy(cipher, message, nonce, key);
-    return { nonce: nonce.toString('hex'), cipher: cipher.toString('hex') };
-}
-
-function decrypt(nonceHex, cipherHex) {
-    const nonce = Buffer.from(nonceHex, 'hex');
-    const cipher = Buffer.from(cipherHex, 'hex');
-    const message = Buffer.alloc(cipher.length - sodium.crypto_secretbox_MACBYTES);
-
-    if (sodium.crypto_secretbox_open_easy(message, cipher, nonce, key)) {
-        return message.toString('utf8');
-    } else {
-        throw new Error('Decryption failed');
-    }
-}
-
-const requestHandler = (req, res) => {
-    console.log(`Request received: ${req.method} ${req.url}`);
-    console.log('Request headers:', req.headers);
-
-    try {
-        const options = {
-            hostname: PROXY_SERVER_IP,
-            port: PROXY_SERVER_PORT,
-            path: '/proxy',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        };
-
-        const proxyRequest = http.request(options, (proxyResponse) => {
-            let data = '';
-            proxyResponse.on('data', (chunk) => data += chunk);
-            proxyResponse.on('end', () => {
-                const responseObj = JSON.parse(data);
-                const decryptedData = decrypt(responseObj.nonce, responseObj.cipher);
-                res.end(decryptedData);
+            // Establish a connection to the remote proxy
+            const remoteProxySocket = net.connect(REMOTE_PROXY_PORT, REMOTE_PROXY_IP, () => {
+                console.log('Local Proxy: Connected to remote proxy');
+                clientSocket.write('HTTP/1.1 200 Connection Established\r\n' +
+                                    'Proxy-agent: Local-Proxy\r\n' +
+                                    '\r\n');
+                remoteProxySocket.write(chunk);
             });
-        });
 
-        let body = '';
-        req.on('data', (chunk) => body += chunk);
-        req.on('end', () => {
-            const encryptedBody = encrypt(body);
-            proxyRequest.write(JSON.stringify(encryptedBody));
-            proxyRequest.end();
-        });
-    } catch (error) {
-        console.error('Error handling request:', error);
-        res.writeHead(500);
-        res.end('Internal Server Error');
-    }
-};
+            clientSocket.pipe(remoteProxySocket);
+            remoteProxySocket.pipe(clientSocket);
 
-const server = http.createServer(requestHandler);
-
-server.listen(LOCAL_PROXY_PORT, () => {
-    console.log(`Local proxy running on http://localhost:${LOCAL_PROXY_PORT}/`);
+            // Error handling
+            handleSocketErrors(clientSocket, remoteProxySocket);
+        }
+    });
 });
+
+function handleSocketErrors(clientSocket, remoteProxySocket) {
+    clientSocket.on('error', (err) => {
+        console.error('Local Proxy - Client Socket Error:', err);
+        remoteProxySocket.end();
+    });
+    remoteProxySocket.on('error', (err) => {
+        console.error('Local Proxy - Remote Proxy Socket Error:', err);
+        clientSocket.end();
+    });
+}
+
+localProxyServer.listen(LOCAL_PROXY_PORT, () => {
+    console.log(`Local proxy server listening on port ${LOCAL_PROXY_PORT}`);
+});
+

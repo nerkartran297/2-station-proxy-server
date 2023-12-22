@@ -1,83 +1,46 @@
 const http = require('http');
-const sodium = require('sodium-native');
-const { URL } = require('url');
+const net = require('net');
+const url = require('url');
 
-// Proxy Server Configuration
-const PROXY_SERVER_PORT = 1080;
+const remoteProxyServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('This is a simple HTTP CONNECT proxy\n');
+});
 
-const password = "i'm here if you need me";
-const key = Buffer.alloc(sodium.crypto_secretbox_KEYBYTES);
-const hash = Buffer.alloc(sodium.crypto_generichash_BYTES);
-sodium.crypto_generichash(hash, Buffer.from(password, 'utf8'));
-hash.copy(key, 0, 0, sodium.crypto_secretbox_KEYBYTES);
+remoteProxyServer.on('connect', (req, clientSocket, head) => {
+    const { port, hostname } = url.parse(`//${req.url}`, true, true);
+    console.log(`Remote Proxy: Connecting to ${hostname}:${port}`);
 
-function encrypt(text) {
-    const message = Buffer.from(text, 'utf8');
-    const cipher = Buffer.alloc(message.length + sodium.crypto_secretbox_MACBYTES);
-    const nonce = Buffer.alloc(sodium.crypto_secretbox_NONCEBYTES);
-    sodium.randombytes_buf(nonce);
+    const targetSocket = net.connect(port || 80, hostname, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n' +
+                           'Proxy-agent: Remote-Proxy\r\n' +
+                           '\r\n');
 
-    sodium.crypto_secretbox_easy(cipher, message, nonce, key);
-    return { nonce: nonce.toString('hex'), cipher: cipher.toString('hex') };
+        if (head && head.length) {
+            targetSocket.write(head);
+        }
+
+        clientSocket.pipe(targetSocket);
+        targetSocket.pipe(clientSocket);
+    });
+
+    // Error handling
+    handleSocketErrors(clientSocket, targetSocket);
+});
+
+function handleSocketErrors(clientSocket, targetSocket) {
+    clientSocket.on('error', (err) => {
+        console.error('Remote Proxy - Client Socket Error:', err);
+        targetSocket.end();
+    });
+    targetSocket.on('error', (err) => {
+        console.error('Remote Proxy - Target Socket Error:', err);
+        clientSocket.end();
+    });
 }
 
-function decrypt(nonceHex, cipherHex) {
-    const nonce = Buffer.from(nonceHex, 'hex');
-    const cipher = Buffer.from(cipherHex, 'hex');
-    const message = Buffer.alloc(cipher.length - sodium.crypto_secretbox_MACBYTES);
+const REMOTE_PROXY_PORT = 1080;
 
-    if (sodium.crypto_secretbox_open_easy(message, cipher, nonce, key)) {
-        return message.toString('utf8');
-    } else {
-        throw new Error('Decryption failed');
-    }
-}
-
-const requestHandler = (req, res) => {
-    if (req.method === 'POST' && req.url === '/proxy') {
-        let body = '';
-        req.on('data', (chunk) => body += chunk);
-        req.on('end', () => {
-            try {
-                const bodyObj = JSON.parse(body);
-                const decryptedBody = decrypt(bodyObj.nonce, bodyObj.cipher);
-
-                const requestDetails = JSON.parse(decryptedBody);
-                const url = new URL(requestDetails.url);
-
-                const options = {
-                    hostname: url.hostname,
-                    port: url.port || 80,
-                    path: url.pathname + url.search,
-                    method: requestDetails.method,
-                    headers: requestDetails.headers
-                };
-
-                const targetRequest = http.request(options, (targetResponse) => {
-                    let responseData = '';
-                    targetResponse.on('data', (chunk) => responseData += chunk);
-                    targetResponse.on('end', () => {
-                        const encryptedResponse = encrypt(responseData);
-                        res.end(JSON.stringify(encryptedResponse));
-                    });
-                });
-
-                targetRequest.end();
-            } catch (error) {
-                console.error('Error handling proxy request:', error);
-                res.writeHead(500);
-                res.end('Internal Server Error');
-            }
-        });
-    } else {
-        console.log(`Invalid request received: ${req.method} ${req.url}`);
-        res.writeHead(404);
-        res.end('Not Found');
-    }
-};
-
-const server = http.createServer(requestHandler);
-
-server.listen(PROXY_SERVER_PORT, () => {
-    console.log(`Proxy server running on port ${PROXY_SERVER_PORT}`);
+remoteProxyServer.listen(REMOTE_PROXY_PORT, () => {
+    console.log(`Remote proxy server listening on port ${REMOTE_PROXY_PORT}`);
 });
